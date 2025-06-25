@@ -1,151 +1,416 @@
-from typing import Generator, Optional, Dict, Any
-import os
-from contextlib import contextmanager
+"""
+Database configuration and models for fraud detection system
+Handles SQLAlchemy setup, session management, and data models
+"""
 
-# SQLAlchemy imports are commented out since they're optional dependencies
-# Uncomment these when you need database functionality
-# from sqlalchemy import create_engine, MetaData
-# from sqlalchemy.ext.declarative import declarative_base
-# from sqlalchemy.orm import sessionmaker, Session
+import asyncio
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, JSON, ForeignKey, Index
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy.sql import func
+import logging
 
-from app.core.config import settings
-from app.core.logging import app_logger
+from .config import settings
 
-# This is a placeholder for the SQLAlchemy Base class
-# Uncomment when you need database functionality
-# Base = declarative_base()
+logger = logging.getLogger(__name__)
 
-# Placeholder for the SQLAlchemy engine
-engine = None
+# Database setup
+engine = create_engine(
+    settings.database_url,
+    echo=settings.database_echo,
+    pool_pre_ping=True,
+    pool_recycle=300
+)
 
-# Placeholder for the SQLAlchemy sessionmaker
-# SessionLocal = None
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
-def setup_database() -> None:
-    """Initialize database connection and session factory.
+# Database Models
+class User(Base):
+    """User model for authentication and case assignment"""
+    __tablename__ = "users"
     
-    This function should be called at application startup to set up the database connection.
-    It's currently a placeholder - uncomment and modify when you need database functionality.
-    """
-    global engine
-    # global SessionLocal
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    email = Column(String(100), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    full_name = Column(String(100))
+    role = Column(String(20), default="analyst")  # analyst, investigator, admin
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
-    # Check if database URL is configured
-    if not settings.database_url or settings.database_url == "sqlite:///./test.db":
-        app_logger.warning("Database URL not configured or using default test database")
-        return
+    # Relationships
+    assigned_cases = relationship("Case", back_populates="assignee")
+    investigations = relationship("Investigation", back_populates="investigator")
+
+class Transaction(Base):
+    """Transaction model for fraud analysis"""
+    __tablename__ = "transactions"
     
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, nullable=False)
+    amount = Column(Float, nullable=False)
+    transaction_type = Column(String(50), nullable=False)  # purchase, transfer, withdrawal, etc.
+    merchant = Column(String(100))
+    location = Column(String(100))
+    country_code = Column(String(2))
+    ip_address = Column(String(45))
+    device_id = Column(String(100))
+    timestamp = Column(DateTime, default=func.now(), index=True)
+    
+    # Fraud detection fields
+    risk_score = Column(Float, default=0.0, index=True)
+    status = Column(String(20), default="normal")  # normal, flagged, confirmed_fraud, false_positive
+    is_suspicious = Column(Boolean, default=False, index=True)
+    
+    # Metadata
+    raw_data = Column(JSON)  # Store original transaction data
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    alerts = relationship("Alert", back_populates="transaction")
+    
+    # Indexes for performance
+    __table_args__ = (
+        Index('idx_transaction_user_time', 'user_id', 'timestamp'),
+        Index('idx_transaction_risk_status', 'risk_score', 'status'),
+        Index('idx_transaction_suspicious', 'is_suspicious', 'timestamp'),
+    )
+
+class FraudRule(Base):
+    """Fraud detection rules configuration"""
+    __tablename__ = "fraud_rules"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    rule_type = Column(String(50), nullable=False)  # amount_threshold, velocity_check, geographic, etc.
+    conditions = Column(JSON, nullable=False)  # Rule conditions as JSON
+    threshold = Column(Float, nullable=False)
+    is_active = Column(Boolean, default=True, index=True)
+    priority = Column(Integer, default=1)  # 1=high, 2=medium, 3=low
+    
+    # Performance metrics
+    total_triggers = Column(Integer, default=0)
+    true_positives = Column(Integer, default=0)
+    false_positives = Column(Integer, default=0)
+    accuracy = Column(Float, default=0.0)
+    
+    # Metadata
+    description = Column(Text)
+    created_by = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    last_triggered = Column(DateTime)
+    
+    # Relationships
+    alerts = relationship("Alert", back_populates="rule")
+
+class Alert(Base):
+    """Fraud alerts generated by detection rules"""
+    __tablename__ = "alerts"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=False, index=True)
+    rule_id = Column(Integer, ForeignKey("fraud_rules.id"), nullable=False, index=True)
+    
+    title = Column(String(200), nullable=False)
+    description = Column(Text)
+    severity = Column(String(20), nullable=False, index=True)  # high, medium, low
+    risk_score = Column(Float, nullable=False)
+    status = Column(String(20), default="open", index=True)  # open, in_progress, resolved, false_positive
+    
+    # Investigation fields
+    assigned_to = Column(Integer, ForeignKey("users.id"))
+    resolution_notes = Column(Text)
+    resolved_at = Column(DateTime)
+    
+    # Metadata
+    created_at = Column(DateTime, default=func.now(), index=True)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    transaction = relationship("Transaction", back_populates="alerts")
+    rule = relationship("FraudRule", back_populates="alerts")
+    assignee = relationship("User")
+    case_alerts = relationship("CaseAlert", back_populates="alert")
+    
+    # Indexes for performance
+    __table_args__ = (
+        Index('idx_alert_severity_status', 'severity', 'status'),
+        Index('idx_alert_created_status', 'created_at', 'status'),
+    )
+
+class Case(Base):
+    """Investigation cases for fraud incidents"""
+    __tablename__ = "cases"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text)
+    case_type = Column(String(50), default="fraud_investigation")
+    priority = Column(String(20), default="medium", index=True)  # high, medium, low
+    status = Column(String(20), default="open", index=True)  # open, in_progress, resolved, closed
+    
+    # Assignment
+    assigned_to = Column(Integer, ForeignKey("users.id"), index=True)
+    created_by = Column(Integer, ForeignKey("users.id"))
+    
+    # Resolution
+    resolution = Column(Text)
+    resolved_at = Column(DateTime)
+    
+    # Metadata
+    created_at = Column(DateTime, default=func.now(), index=True)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    assignee = relationship("User", foreign_keys=[assigned_to], back_populates="assigned_cases")
+    creator = relationship("User", foreign_keys=[created_by])
+    case_alerts = relationship("CaseAlert", back_populates="case")
+    investigations = relationship("Investigation", back_populates="case")
+
+class CaseAlert(Base):
+    """Many-to-many relationship between cases and alerts"""
+    __tablename__ = "case_alerts"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
+    alert_id = Column(Integer, ForeignKey("alerts.id"), nullable=False, index=True)
+    added_at = Column(DateTime, default=func.now())
+    
+    # Relationships
+    case = relationship("Case", back_populates="case_alerts")
+    alert = relationship("Alert", back_populates="case_alerts")
+
+class Investigation(Base):
+    """Investigation notes and evidence for cases"""
+    __tablename__ = "investigations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
+    investigator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    notes = Column(Text, nullable=False)
+    evidence = Column(JSON)  # Store evidence data as JSON
+    investigation_type = Column(String(50), default="general")  # general, technical, financial
+    
+    # Metadata
+    created_at = Column(DateTime, default=func.now(), index=True)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    case = relationship("Case", back_populates="investigations")
+    investigator = relationship("User", back_populates="investigations")
+
+# Database utility functions
+def get_db_session() -> Session:
+    """Get database session"""
+    db = SessionLocal()
     try:
-        # Uncomment when you need database functionality
-        # engine = create_engine(
-        #     settings.database_url,
-        #     pool_pre_ping=True,  # Check connection before using from pool
-        #     pool_recycle=3600,   # Recycle connections after 1 hour
-        #     echo=settings.debug, # Log SQL queries in debug mode
-        # )
-        # 
-        # # Create session factory
-        # SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        # 
-        # app_logger.info(f"Database connection established: {settings.database_url.split('@')[-1]}")
-        pass
+        return db
+    finally:
+        pass  # Session will be closed by caller
+
+async def init_db():
+    """Initialize database and create tables"""
+    try:
+        # Create all tables
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Database tables created successfully")
+        
+        # Create sample data for development
+        await create_sample_data()
+        
     except Exception as e:
-        app_logger.error(f"Failed to connect to database: {e}")
+        logger.error(f"❌ Error initializing database: {e}")
         raise
 
-# Uncomment when you need database functionality
-# def get_db() -> Generator[Session, None, None]:
-#     """Get a database session.
-#     
-#     This function is intended to be used as a FastAPI dependency.
-#     
-#     Yields:
-#         SQLAlchemy Session
-#     """
-#     if not SessionLocal:
-#         raise RuntimeError("Database not initialized. Call setup_database() first.")
-#     
-#     db = SessionLocal()
-#     try:
-#         yield db
-#     finally:
-#         db.close()
+async def create_sample_data():
+    """Create sample data for development and testing"""
+    db = SessionLocal()
+    try:
+        # Check if data already exists
+        if db.query(User).first():
+            logger.info("📊 Sample data already exists, skipping creation")
+            return
+        
+        # Create sample users
+        users = [
+            User(
+                username="admin",
+                email="admin@frauddetection.com",
+                hashed_password="$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",  # secret
+                full_name="System Administrator",
+                role="admin"
+            ),
+            User(
+                username="analyst1",
+                email="analyst1@frauddetection.com",
+                hashed_password="$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",  # secret
+                full_name="Fraud Analyst",
+                role="analyst"
+            ),
+            User(
+                username="investigator1",
+                email="investigator1@frauddetection.com",
+                hashed_password="$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",  # secret
+                full_name="Senior Investigator",
+                role="investigator"
+            )
+        ]
+        
+        for user in users:
+            db.add(user)
+        
+        # Create sample fraud rules
+        rules = [
+            FraudRule(
+                name="High Amount Transaction",
+                rule_type="amount_threshold",
+                conditions={"amount": {"operator": ">", "value": 10000}},
+                threshold=10000.0,
+                description="Flags transactions over $10,000",
+                priority=1
+            ),
+            FraudRule(
+                name="Velocity Check - Multiple Transactions",
+                rule_type="velocity_check",
+                conditions={"count": {"operator": ">", "value": 5}, "window_minutes": 60},
+                threshold=5.0,
+                description="Flags users with more than 5 transactions in 1 hour",
+                priority=2
+            ),
+            FraudRule(
+                name="Geographic Risk - High Risk Countries",
+                rule_type="geographic",
+                conditions={"countries": ["XX", "YY", "ZZ"]},
+                threshold=1.0,
+                description="Flags transactions from high-risk countries",
+                priority=1
+            ),
+            FraudRule(
+                name="Off-Hours Transaction",
+                rule_type="time_based",
+                conditions={"hours": {"start": 23, "end": 6}},
+                threshold=1.0,
+                description="Flags transactions during off-hours (11 PM - 6 AM)",
+                priority=3
+            )
+        ]
+        
+        for rule in rules:
+            db.add(rule)
+        
+        # Create sample transactions
+        base_time = datetime.now() - timedelta(days=7)
+        transactions = []
+        
+        for i in range(100):
+            # Create mix of normal and suspicious transactions
+            is_suspicious = i % 10 == 0  # Every 10th transaction is suspicious
+            amount = 15000.0 if is_suspicious else 50.0 + (i * 10)
+            risk_score = 85.0 if is_suspicious else 15.0 + (i % 30)
+            
+            transaction = Transaction(
+                user_id=1000 + (i % 50),  # 50 different users
+                amount=amount,
+                transaction_type="purchase" if i % 2 == 0 else "transfer",
+                merchant=f"Merchant_{i % 20}",
+                location=f"City_{i % 10}",
+                country_code="US" if not is_suspicious else "XX",
+                ip_address=f"192.168.1.{i % 255}",
+                device_id=f"device_{i % 25}",
+                timestamp=base_time + timedelta(hours=i),
+                risk_score=risk_score,
+                status="flagged" if is_suspicious else "normal",
+                is_suspicious=is_suspicious,
+                raw_data={"original_amount": amount, "currency": "USD"}
+            )
+            transactions.append(transaction)
+        
+        for transaction in transactions:
+            db.add(transaction)
+        
+        db.commit()
+        
+        # Create sample alerts for suspicious transactions
+        suspicious_transactions = [t for t in transactions if t.is_suspicious]
+        for i, transaction in enumerate(suspicious_transactions):
+            alert = Alert(
+                transaction_id=transaction.id,
+                rule_id=1,  # High Amount Transaction rule
+                title=f"High Risk Transaction - ${transaction.amount:,.2f}",
+                description=f"Transaction of ${transaction.amount:,.2f} exceeds risk threshold",
+                severity="high" if transaction.risk_score > 80 else "medium",
+                risk_score=transaction.risk_score,
+                status="open" if i % 3 != 0 else "resolved"
+            )
+            db.add(alert)
+        
+        # Create sample cases
+        cases = [
+            Case(
+                title="Suspicious Activity - User 1001",
+                description="Multiple high-value transactions from new user account",
+                priority="high",
+                status="in_progress",
+                assigned_to=2,  # analyst1
+                created_by=1   # admin
+            ),
+            Case(
+                title="Geographic Anomaly Investigation",
+                description="Transactions from multiple countries within short timeframe",
+                priority="medium",
+                status="open",
+                assigned_to=3,  # investigator1
+                created_by=1   # admin
+            ),
+            Case(
+                title="Velocity Pattern Analysis",
+                description="Unusual transaction velocity patterns detected",
+                priority="low",
+                status="resolved",
+                assigned_to=2,  # analyst1
+                created_by=1,  # admin
+                resolution="False positive - legitimate business activity",
+                resolved_at=datetime.now() - timedelta(days=1)
+            )
+        ]
+        
+        for case in cases:
+            db.add(case)
+        
+        db.commit()
+        logger.info("✅ Sample data created successfully")
+        
+    except Exception as e:
+        logger.error(f"❌ Error creating sample data: {e}")
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
-# @contextmanager
-# def get_db_context() -> Generator[Session, None, None]:
-#     """Get a database session as a context manager.
-#     
-#     This function is intended to be used with the 'with' statement.
-#     
-#     Yields:
-#         SQLAlchemy Session
-#     """
-#     if not SessionLocal:
-#         raise RuntimeError("Database not initialized. Call setup_database() first.")
-#     
-#     db = SessionLocal()
-#     try:
-#         yield db
-#     finally:
-#         db.close()
-
-# def create_tables() -> None:
-#     """Create all tables defined in SQLAlchemy models.
-#     
-#     This function should be called at application startup to create tables
-#     that don't exist yet. It's safe to call this function multiple times.
-#     """
-#     if not engine:
-#         app_logger.warning("Database not initialized. Call setup_database() first.")
-#         return
-#     
-#     try:
-#         # Create tables
-#         Base.metadata.create_all(bind=engine)
-#         app_logger.info("Database tables created")
-#     except Exception as e:
-#         app_logger.error(f"Failed to create database tables: {e}")
-#         raise
-
-# def get_table_names() -> list[str]:
-#     """Get a list of all table names in the database.
-#     
-#     Returns:
-#         List of table names
-#     """
-#     if not engine:
-#         app_logger.warning("Database not initialized. Call setup_database() first.")
-#         return []
-#     
-#     try:
-#         # Get table names
-#         metadata = MetaData()
-#         metadata.reflect(bind=engine)
-#         return list(metadata.tables.keys())
-#     except Exception as e:
-#         app_logger.error(f"Failed to get table names: {e}")
-#         return []
-
-# def execute_raw_sql(sql: str, params: Optional[Dict[str, Any]] = None) -> list[Dict[str, Any]]:
-#     """Execute a raw SQL query.
-#     
-#     Args:
-#         sql: SQL query string
-#         params: Optional parameters for the SQL query
-#         
-#     Returns:
-#         List of dictionaries with query results
-#     """
-#     if not engine:
-#         app_logger.warning("Database not initialized. Call setup_database() first.")
-#         return []
-#     
-#     try:
-#         with engine.connect() as connection:
-#             result = connection.execute(sql, params or {})
-#             return [dict(row) for row in result]
-#     except Exception as e:
-#         app_logger.error(f"Failed to execute SQL query: {e}")
-#         app_logger.debug(f"SQL query: {sql}")
-#         app_logger.debug(f"SQL params: {params}")
-#         raise
+# Database health check
+def check_database_health() -> Dict[str, Any]:
+    """Check database connectivity and health"""
+    try:
+        db = SessionLocal()
+        # Simple query to test connection
+        result = db.execute("SELECT 1").fetchone()
+        db.close()
+        
+        return {
+            "status": "healthy",
+            "database_url": settings.database_url.split("://")[0] + "://***",
+            "connection": "ok"
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "database_url": settings.database_url.split("://")[0] + "://***"
+        }
