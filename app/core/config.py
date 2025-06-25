@@ -1,83 +1,95 @@
-from typing import Any, Dict, List, Optional, Union
+"""
+Advanced configuration management for fraud detection system
+Handles environment variables, security settings, and application configuration
+"""
+
 import os
-from pydantic import AnyHttpUrl, field_validator, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
+from typing import Optional, List
+from pydantic import BaseSettings, validator
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 class Settings(BaseSettings):
-    """Application settings.
+    """Application settings with validation and defaults"""
     
-    This class uses Pydantic's BaseSettings which automatically reads from environment variables.
-    Environment variables take precedence over values defined in the class.
+    # Application Info
+    app_name: str = "Fraud Detection & Tracking System"
+    app_version: str = "1.0.0"
+    app_description: str = "Advanced fraud detection and case management system"
     
-    Example:
-        If you define PORT=9000 in your environment, it will override the default value of 8000.
-    """
-    # CORE SETTINGS
-    app_name: str = "FastAPI Application"
-    app_description: str = "A modern web application built with FastAPI"
-    app_version: str = "0.1.0"
+    # Server Configuration
+    host: str = "0.0.0.0"
+    port: int = 8080
     debug: bool = False
     
-    # API SETTINGS
-    api_prefix: str = "/api"
-    
-    # SERVER SETTINGS
-    host: str = "0.0.0.0"  # 0.0.0.0 for Docker/production compatibility
-    port: int = 8000
-    
-    # CORS SETTINGS
-    # List of origins that are allowed to make cross-origin requests
-    # Use ["*"] to allow any origin (not recommended for production)
-    cors_origins: List[str] = []
-    
-    # SECURITY SETTINGS
-    # Secret key for signing tokens - MUST be overridden in production
-    secret_key: str = "CHANGEME_IN_PRODUCTION"
-    # Algorithm used for token signing
+    # Security Configuration
+    secret_key: str = "fraud_detection_secret_key_change_in_production"
+    access_token_expire_minutes: int = 60 * 24  # 24 hours
     algorithm: str = "HS256"
-    # Token expiration time in minutes
-    access_token_expire_minutes: int = 30
     
-    # DATABASE SETTINGS
-    # Database connection string - override in production
-    database_url: Optional[str] = None
+    # Database Configuration
+    database_url: str = "sqlite:///./data/fraud_detection.db"
+    database_echo: bool = False
     
-    # STATIC FILES
-    static_dir: str = "app/static"
+    # Fraud Detection Configuration
+    default_risk_threshold: float = 70.0
+    max_transaction_amount: float = 50000.0
+    velocity_check_window_minutes: int = 60
+    geographic_risk_countries: List[str] = ["XX", "YY"]  # ISO country codes
     
-    # TEMPLATES
-    templates_dir: str = "app/templates"
+    # Alert Configuration
+    alert_retention_days: int = 90
+    max_alerts_per_page: int = 50
     
-    # Configure Pydantic to use environment variables
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-    )
+    # Case Management Configuration
+    case_retention_days: int = 365
+    max_cases_per_page: int = 25
     
-    # Validators
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
-        """Parse CORS origins from string to list.
-        
-        This allows setting CORS_ORIGINS as a comma-separated string in .env file.
-        """
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
-            return v
-        raise ValueError(v)
+    # External API Configuration
+    enable_external_apis: bool = False
+    external_api_timeout: int = 30
+    
+    # Logging Configuration
+    log_level: str = "INFO"
+    log_file: Optional[str] = None
+    
+    # Asset Configuration
+    static_files_path: str = "app/static"
+    upload_path: str = "app/static/uploads"
+    max_upload_size: int = 10 * 1024 * 1024  # 10MB
+    
+    @validator('secret_key')
+    def validate_secret_key(cls, v):
+        if v == "fraud_detection_secret_key_change_in_production" and not os.getenv('DEBUG'):
+            raise ValueError("Please change the default secret key in production")
+        return v
+    
+    @validator('database_url')
+    def validate_database_url(cls, v):
+        # Ensure database directory exists for SQLite
+        if v.startswith('sqlite:'):
+            db_path = Path(v.replace('sqlite:///', ''))
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        return v
+    
+    @validator('default_risk_threshold')
+    def validate_risk_threshold(cls, v):
+        if not 0 <= v <= 100:
+            raise ValueError("Risk threshold must be between 0 and 100")
+        return v
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
 
-# Create a global settings instance
+# Global settings instance
 settings = Settings()
 
-# Helper function to get settings as a dictionary
-def get_settings_dict() -> Dict[str, Any]:
-    """Return settings as a dictionary for easy access."""
-    return settings.model_dump()
-
-# Helper function to get a specific setting
-def get_setting(key: str, default: Any = None) -> Any:
-    """Get a specific setting by key with an optional default value."""
-    return getattr(settings, key, default)
+# Ensure required directories exist
+Path(settings.static_files_path).mkdir(parents=True, exist_ok=True)
+Path(settings.upload_path).mkdir(parents=True, exist_ok=True)
+Path("data").mkdir(parents=True, exist_ok=True)
+Path("logs").mkdir(parents=True, exist_ok=True)
